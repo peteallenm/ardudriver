@@ -10,6 +10,7 @@
  * Copyright (C) 2017 Fuzhou Rockchip Electronics Co., Ltd.
  */
 
+#define RADXA
  #include <linux/clk.h>
  #include <linux/delay.h>
  #include <linux/gpio/consumer.h>
@@ -21,6 +22,13 @@
  #include <media/v4l2-device.h>
  #include <media/v4l2-event.h>
  #include <media/v4l2-fwnode.h>
+ 
+ #ifdef RADXA 
+#include <linux/rk-camera-module.h>
+#include <linux/rk-preisp.h>
+#include "../platform/rockchip/isp/rkisp_tb_helper.h"
+#endif
+
  #include "arducam-pivariety.h"
  
  static int debug;
@@ -98,6 +106,19 @@
      bool streaming;
  };
  
+ #ifdef RADXA
+static struct rkmodule_csi_dphy_param dcphy_param = {
+	.vendor = PHY_VENDOR_SAMSUNG,
+	.lp_vol_ref = 6,
+	.lp_hys_sw = {3, 0, 0, 0},
+	.lp_escclk_pol_sel = {1, 1, 1, 1},
+	.skew_data_cal_clk = {0, 3, 3, 3},
+	.clk_hs_term_sel = 2,
+	.data_hs_term_sel = {2, 2, 2, 2},
+	.reserved = {0},
+};
+#endif
+
  static inline struct pivariety *to_pivariety(struct v4l2_subdev *_sd)
  {
      return container_of(_sd, struct pivariety, sd);
@@ -957,9 +978,157 @@
      return 0;
  }
  
+ #ifdef RADXA
+ static long pivariety_ioctl(struct v4l2_subdev *sd, unsigned int cmd, void *arg)
+{
+	struct pivariety *pivariety = to_pivariety(sd);
+	struct rkmodule_hdr_cfg *hdr;
+	struct rkmodule_channel_info *ch_info;
+	u32 i, h, w, stream;
+	long ret = 0;
+	u64 pixel_rate = 0;
+	struct rkmodule_csi_dphy_param *dphy_param;
+	u8 lanes = pivariety->bus.num_data_lanes;
+	struct rkmodule_exp_delay *exp_delay;
+	struct rkmodule_exp_info *exp_info;
+	int idx_max = 0;
+
+	switch (cmd) {
+#if 0
+	case PREISP_CMD_SET_HDRAE_EXP:
+		if (imx415->cur_mode->hdr_mode == HDR_X2)
+			ret = imx415_set_hdrae(imx415, arg);
+		else if (imx415->cur_mode->hdr_mode == HDR_X3)
+			ret = imx415_set_hdrae_3frame(imx415, arg);
+		break;
+#endif
+	case RKMODULE_GET_MODULE_INFO:
+		imx415_get_module_inf(imx415, (struct rkmodule_inf *)arg);
+		break;
+#if 0
+	case RKMODULE_GET_HDR_CFG:
+		hdr = (struct rkmodule_hdr_cfg *)arg;
+		hdr->esp.mode = HDR_NORMAL_VC;
+		hdr->hdr_mode = imx415->cur_mode->hdr_mode;
+		break;
+	case RKMODULE_SET_HDR_CFG:
+		hdr = (struct rkmodule_hdr_cfg *)arg;
+		w = imx415->cur_mode->width;
+		h = imx415->cur_mode->height;
+		for (i = 0; i < imx415->cfg_num; i++) {
+			if (w == imx415->supported_modes[i].width &&
+			    h == imx415->supported_modes[i].height &&
+			    imx415->supported_modes[i].hdr_mode == hdr->hdr_mode) {
+				dev_info(&imx415->client->dev, "set hdr cfg, set mode to %d\n", i);
+				imx415_change_mode(imx415, &imx415->supported_modes[i]);
+				break;
+			}
+		}
+		if (i == imx415->cfg_num) {
+			dev_err(&imx415->client->dev,
+				"not find hdr mode:%d %dx%d config\n",
+				hdr->hdr_mode, w, h);
+			ret = -EINVAL;
+		} else {
+			mode = imx415->cur_mode;
+			if (imx415->streaming) {
+				ret = imx415_write_reg(imx415->client, IMX415_GROUP_HOLD_REG,
+					IMX415_REG_VALUE_08BIT, IMX415_GROUP_HOLD_START);
+
+				ret |= imx415_write_array(imx415->client, imx415->cur_mode->reg_list);
+
+				ret |= imx415_write_reg(imx415->client, IMX415_GROUP_HOLD_REG,
+					IMX415_REG_VALUE_08BIT, IMX415_GROUP_HOLD_END);
+				if (ret)
+					return ret;
+			}
+			w = mode->hts_def - imx415->cur_mode->width;
+			h = mode->vts_def - mode->height;
+			mutex_lock(&imx415->mutex);
+			__v4l2_ctrl_modify_range(imx415->hblank, w, w, 1, w);
+			__v4l2_ctrl_modify_range(imx415->vblank, h,
+				IMX415_VTS_MAX - mode->height,
+				1, h);
+			__v4l2_ctrl_s_ctrl(imx415->link_freq, mode->mipi_freq_idx);
+			pixel_rate = (u32)link_freq_items[mode->mipi_freq_idx] /
+				mode->bpp * 2 * lanes;
+			__v4l2_ctrl_s_ctrl_int64(imx415->pixel_rate,
+						 pixel_rate);
+			mutex_unlock(&imx415->mutex);
+		}
+		break;
+	case RKMODULE_SET_QUICK_STREAM:
+
+		stream = *((u32 *)arg);
+
+		if (stream)
+			ret = imx415_write_reg(imx415->client, IMX415_REG_CTRL_MODE,
+				IMX415_REG_VALUE_08BIT, IMX415_MODE_STREAMING);
+		else
+			ret = imx415_write_reg(imx415->client, IMX415_REG_CTRL_MODE,
+				IMX415_REG_VALUE_08BIT, IMX415_MODE_SW_STANDBY);
+		break;
+	case RKMODULE_GET_SONY_BRL:
+		if (imx415->cur_mode->width == 3864 && imx415->cur_mode->height == 2192)
+			*((u32 *)arg) = BRL_ALL;
+		else
+			*((u32 *)arg) = BRL_BINNING;
+		break;
+#endif
+	case RKMODULE_GET_CHANNEL_INFO:
+		ch_info = (struct rkmodule_channel_info *)arg;
+		ret = imx415_get_channel_info(imx415, ch_info);
+		break;
+	case RKMODULE_GET_CSI_DPHY_PARAM:
+		if (imx415->cur_mode->hdr_mode == HDR_X2) {
+			dphy_param = (struct rkmodule_csi_dphy_param *)arg;
+			*dphy_param = dcphy_param;
+			dev_info(&imx415->client->dev,
+				 "get sensor dphy param\n");
+		} else
+			ret = -EINVAL;
+		break;
+#if 0
+	case RKMODULE_GET_EXP_DELAY:
+		exp_delay = (struct rkmodule_exp_delay *)arg;
+		exp_delay->exp_delay = 2;
+		exp_delay->gain_delay = 2;
+		exp_delay->vts_delay = 1;
+		break;
+	case RKMODULE_GET_EXP_INFO:
+		exp_info = (struct rkmodule_exp_info *)arg;
+		if (imx415->cur_mode->hdr_mode == NO_HDR)
+			idx_max = 1;
+		else if (imx415->cur_mode->hdr_mode == HDR_X2)
+			idx_max = 2;
+		else
+			idx_max = 3;
+		for (i = 0; i < idx_max; i++) {
+			exp_info->exp[i] = imx415->cur_exposure[i];
+			exp_info->gain[i] = imx415->cur_gain[i];
+		}
+		exp_info->hts = imx415->cur_mode->hts_def;
+		exp_info->vts = imx415->cur_vts;
+		exp_info->pclk = imx415->pclk;
+		exp_info->gain_mode.gain_mode = RKMODULE_GAIN_MODE_DB;
+		exp_info->gain_mode.factor = 1000;
+		break;
+    #endif
+	default:
+		ret = -ENOIOCTLCMD;
+		break;
+	}
+
+	return ret;
+}
+#endif
+
  static const struct v4l2_subdev_core_ops pivariety_core_ops = {
      .subscribe_event = v4l2_ctrl_subdev_subscribe_event,
      .unsubscribe_event = v4l2_event_subdev_unsubscribe,
+#ifdef RADXA
+     .ioctl = pivariety_ioctl,
+#endif
  };
  
  static const struct v4l2_subdev_video_ops pivariety_video_ops = {
