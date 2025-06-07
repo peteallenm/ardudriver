@@ -26,7 +26,7 @@
  #ifdef RADXA 
 #include <linux/rk-camera-module.h>
 #include <linux/rk-preisp.h>
-#include "../platform/rockchip/isp/rkisp_tb_helper.h"
+#include "/home/pallen/Build/linux-radxa/drivers/media/platform/rockchip/isp/rkisp_tb_helper.h"
 #endif
 
  #include "arducam-pivariety.h"
@@ -685,7 +685,7 @@ static struct rkmodule_csi_dphy_param dcphy_param = {
          i = 0;
  
      format->format.code = supported_formats[i].mbus_code;
- 
+      
      for (j = 0; j < supported_formats[i].num_resolution_set; j++) {
          if (supported_formats[i].resolution_set[j].width ==
                          format->format.width &&
@@ -979,20 +979,42 @@ static struct rkmodule_csi_dphy_param dcphy_param = {
  }
  
  #ifdef RADXA
+ static void pivariety_get_module_inf(struct pivariety *pivariety,
+				  struct rkmodule_inf *inf)
+{
+	memset(inf, 0, sizeof(*inf));
+	strlcpy(inf->base.sensor, "arducam-pivariety", sizeof("arducam-pivariety"));
+	strlcpy(inf->base.module, "arducam",
+		sizeof("arducam"));
+	strlcpy(inf->base.lens, "default", sizeof("default"));
+}
+
+static int pivariety_get_channel_info(struct pivariety *pivariety, struct rkmodule_channel_info *ch_info)
+{
+	if (ch_info->index < PAD0 || ch_info->index >= PAD_MAX)
+		return -EINVAL;
+    ch_info->width = pivariety->supported_formats[pivariety->current_format_idx].resolution_set->width;
+	ch_info->height = pivariety->supported_formats[pivariety->current_format_idx].resolution_set->height;
+	ch_info->bus_fmt = pivariety->supported_formats[pivariety->current_format_idx].mbus_code; // Sketchy
+	return 0;
+}
+
  static long pivariety_ioctl(struct v4l2_subdev *sd, unsigned int cmd, void *arg)
 {
 	struct pivariety *pivariety = to_pivariety(sd);
-	struct rkmodule_hdr_cfg *hdr;
 	struct rkmodule_channel_info *ch_info;
-	u32 i, h, w, stream;
 	long ret = 0;
-	u64 pixel_rate = 0;
 	struct rkmodule_csi_dphy_param *dphy_param;
+
+    #if 0
+	struct rkmodule_hdr_cfg *hdr;
+	u32 i, h, w, stream;
 	u8 lanes = pivariety->bus.num_data_lanes;
 	struct rkmodule_exp_delay *exp_delay;
 	struct rkmodule_exp_info *exp_info;
 	int idx_max = 0;
-
+	u64 pixel_rate = 0;
+    #endif
 	switch (cmd) {
 #if 0
 	case PREISP_CMD_SET_HDRAE_EXP:
@@ -1003,7 +1025,7 @@ static struct rkmodule_csi_dphy_param dcphy_param = {
 		break;
 #endif
 	case RKMODULE_GET_MODULE_INFO:
-		imx415_get_module_inf(imx415, (struct rkmodule_inf *)arg);
+		pivariety_get_module_inf(pivariety, (struct rkmodule_inf *)arg);
 		break;
 #if 0
 	case RKMODULE_GET_HDR_CFG:
@@ -1077,16 +1099,15 @@ static struct rkmodule_csi_dphy_param dcphy_param = {
 #endif
 	case RKMODULE_GET_CHANNEL_INFO:
 		ch_info = (struct rkmodule_channel_info *)arg;
-		ret = imx415_get_channel_info(imx415, ch_info);
+		ret = pivariety_get_channel_info(pivariety, ch_info);
 		break;
 	case RKMODULE_GET_CSI_DPHY_PARAM:
-		if (imx415->cur_mode->hdr_mode == HDR_X2) {
-			dphy_param = (struct rkmodule_csi_dphy_param *)arg;
-			*dphy_param = dcphy_param;
-			dev_info(&imx415->client->dev,
-				 "get sensor dphy param\n");
-		} else
-			ret = -EINVAL;
+        struct v4l2_subdev *sd = &pivariety->sd;
+        struct i2c_client *client = v4l2_get_subdevdata(sd);
+        dphy_param = (struct rkmodule_csi_dphy_param *)arg;
+        *dphy_param = dcphy_param;
+        dev_info(&client->dev,
+             "get sensor dphy param\n");
 		break;
 #if 0
 	case RKMODULE_GET_EXP_DELAY:
@@ -1575,19 +1596,21 @@ static struct rkmodule_csi_dphy_param dcphy_param = {
      /* Initialize source pad */
      pivariety->pad.flags = MEDIA_PAD_FL_SOURCE;
  
-     dev_info(dev, "pivariety: pad.flags = 0x%x\n", pivariety->pad.flags);
+     dev_info(dev, "pivariety: pad.flags = 0x%x\n", (unsigned int)pivariety->pad.flags);
      ret = media_entity_pads_init(&pivariety->sd.entity, 1, &pivariety->pad);
      if (ret)
+     {
          dev_err(dev, "media_entity_pads_init failed: %d\n", ret);
          goto error_handler_free;
-    
+     }
     pivariety->sd.fwnode = dev_fwnode(dev); 
      dev_info(dev, "pivariety: registering subdevice with V4L2 async\n");
      ret = v4l2_async_register_subdev_sensor(&pivariety->sd);
      if (ret < 0)
+     {
          dev_err(dev, "pivariety: subdev registration failed: %d\n", ret);
          goto error_media_entity;
- 
+     }
      pm_runtime_set_active(dev);
      pm_runtime_enable(dev);
      pm_runtime_idle(dev);
